@@ -64,6 +64,21 @@
 
 namespace android {
 
+static const char OEM_BOOTANIMATION_FILE[] = "/oem/media/bootanimation.zip";
+static const char SYSTEM_BOOTANIMATION_FILE[] = "/system/media/bootanimation.zip";
+static const char SYSTEM_ENCRYPTED_BOOTANIMATION_FILE[] = "/system/media/bootanimation-encrypted.zip";
+static const char THEME_BOOTANIMATION_FILE[] = "/data/system/theme/bootanimation.zip";
+static const char SYSTEM_DATA_DIR_PATH[] = "/data/system";
+static const char SYSTEM_TIME_DIR_NAME[] = "time";
+static const char SYSTEM_TIME_DIR_PATH[] = "/data/system/time";
+static const char LAST_TIME_CHANGED_FILE_NAME[] = "last_time_change";
+static const char LAST_TIME_CHANGED_FILE_PATH[] = "/data/system/time/last_time_change";
+static const char ACCURATE_TIME_FLAG_FILE_NAME[] = "time_is_accurate";
+static const char ACCURATE_TIME_FLAG_FILE_PATH[] = "/data/system/time/time_is_accurate";
+// Java timestamp format. Don't show the clock if the date is before 2000-01-01 00:00:00.
+static const long long ACCURATE_TIME_EPOCH = 946684800000;
+static const char EXIT_PROP_NAME[] = "service.bootanim.exit";
+static const char PLAY_SOUND_PROP_NAME[] = "persist.sys.bootanim.play_sound";
 static const int ANIM_ENTRY_NAME_MAX = 256;
 
 // ---------------------------------------------------------------------------
@@ -224,6 +239,36 @@ status_t BootAnimation::initTexture(const Animation::Frame& frame)
     return NO_ERROR;
 }
 
+
+// Get bootup Animation File
+// Parameter: ImageID: IMG_OEM IMG_SYS IMG_ENC IMG_THM
+// Return Value : File path
+const char *BootAnimation::getAnimationFileName(ImageID image)
+{
+    const char *fileName[4] = { OEM_BOOTANIMATION_FILE,
+            SYSTEM_BOOTANIMATION_FILE,
+            SYSTEM_ENCRYPTED_BOOTANIMATION_FILE,
+            THEME_BOOTANIMATION_FILE };
+
+    // Load animations of Carrier through regionalization environment
+    if (Environment::isSupported()) {
+        Environment* environment = new Environment();
+        const char* animFile = environment->getMediaFile(
+                Environment::ANIMATION_TYPE, Environment::BOOT_STATUS);
+        ALOGE("Get Carrier Animation type: %d,status:%d", Environment::ANIMATION_TYPE,Environment::BOOT_STATUS);
+        if (animFile != NULL && strcmp(animFile, "") != 0) {
+           return animFile;
+        }else{
+           ALOGD("Get Carrier Animation file: %s failed", animFile);
+        }
+        delete environment;
+    }else{
+           ALOGE("Get Carrier Animation file,since it's not support carrier");
+    }
+
+    return fileName[image];
+}
+
 status_t BootAnimation::readyToRun() {
     mAssets.addDefaultAssets();
 
@@ -285,14 +330,44 @@ status_t BootAnimation::readyToRun() {
 
     bool encryptedAnimation = atoi(decrypt) != 0 || !strcmp("trigger_restart_min_framework", decrypt);
 
-    if (encryptedAnimation && (access(SYSTEM_ENCRYPTED_BOOTANIMATION_FILE, R_OK) == 0)) {
-        mZipFileName = SYSTEM_ENCRYPTED_BOOTANIMATION_FILE;
+    if (encryptedAnimation && (access(getAnimationFileName(IMG_ENC), R_OK) == 0)) {
+        mZipFileName = getAnimationFileName(IMG_ENC);
+    }
+    else if (access(getAnimationFileName(IMG_THM), R_OK) == 0) {
+        mZipFileName = getAnimationFileName(IMG_THM);
+    }
+    else if (access(getAnimationFileName(IMG_OEM), R_OK) == 0) {
+        mZipFileName = getAnimationFileName(IMG_OEM);
     }
     else if (access(OEM_BOOTANIMATION_FILE, R_OK) == 0) {
         mZipFileName = OEM_BOOTANIMATION_FILE;
     }
-    else if (access(SYSTEM_BOOTANIMATION_FILE, R_OK) == 0) {
-        mZipFileName = SYSTEM_BOOTANIMATION_FILE;
+
+#ifdef PRELOAD_BOOTANIMATION
+    // Preload the bootanimation zip on memory, so we don't stutter
+    // when showing the animation
+    FILE* fd;
+    if (encryptedAnimation && access(getAnimationFileName(IMG_ENC), R_OK) == 0)
+        fd = fopen(getAnimationFileName(IMG_ENC), "r");
+    else if (access(getAnimationFileName(IMG_THM), R_OK) == 0)
+        fd = fopen(getAnimationFileName(IMG_THM), "r");
+    else if (access(getAnimationFileName(IMG_OEM), R_OK) == 0)
+        fd = fopen(getAnimationFileName(IMG_OEM), "r");
+    else if (access(getAnimationFileName(IMG_SYS), R_OK) == 0)
+        fd = fopen(getAnimationFileName(IMG_SYS), "r");
+    else
+        return NO_ERROR;
+
+    if (fd != NULL) {
+        // Since including fcntl.h doesn't give us the wrapper, use the syscall.
+        // 32 bits takes LO/HI offset (we don't care about endianness of 0).
+#if defined(__aarch64__) || defined(__x86_64__)
+        if (syscall(__NR_readahead, fd, 0, INT_MAX))
+#else
+        if (syscall(__NR_readahead, fd, 0, 0, INT_MAX))
+#endif
+            ALOGW("Unable to cache the animation");
+        fclose(fd);
     }
     return NO_ERROR;
 }
